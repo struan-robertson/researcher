@@ -1,0 +1,222 @@
+#+title: ML Literature Discovery Tool: Design
+#+startup: overview
+#+options: toc:nil
+
+* Purpose
+
+Find machine-learning papers relevant to a research question and return an ordered reading list with an allocation of the researcher's attention.
+The emphasis is iterative discovery and assessment, not topic reports or experiment execution.
+A persistent source library lets subsequent investigations reuse acquired papers and citation relationships.
+Relevance is assessed against each investigation's brief, not stored as a universal property of a paper.
+
+* Architecture
+
+Build an independent Python CLI application that calls model APIs directly.
+Expose one command taking a Markdown research brief or an existing result directory, with optional configuration overrides, for example =researcher question.md [options]=.
+CLI arguments override configuration defaults.
+The command runs research, handles any end-of-run PDF handoff and exits with final results, without requiring separate import or resume commands.
+The Python engine controls the workflow; models perform bounded tasks without searching or requesting enrichment.
+
+Access models through a provider abstraction that owns API communication, authentication and provider-specific request headers.
+The initial integration uses OpenCode with an application-specific =User-Agent= and a stable =x-opencode-session= ID per model conversation.
+Preserve the session ID across retries, using distinct IDs for independent conversations.
+Keep authentication extensible so OAuth can be added later without changing the research engine.
+Pi and pi-subagents are not runtime dependencies.
+
+Configure a flash role for screening and duplicate detection and an evaluator role for paper assessment and attention allocation.
+The initial evaluator is MiMo 2.6-Pro; provider model identifiers and supported settings belong in configuration rather than prompts.
+
+Use SQLite for paper identities, metadata, citation edges, provenance and operational state.
+Keep PDFs and substantial extracted text in managed artifact storage referenced by the database.
+All model task data, including the research brief and working decisions, comes from database records and referenced artifacts.
+A read-through data layer completes and stores any outstanding acquisition for the requested enrichment level before returning its inputs.
+Python formats the stored data for each task, selecting only the inputs specified for that task's level.
+Continuation reuses stored sources and decisions rather than restoring workflow snapshots.
+A GUI, server, agent runtime and agent-facing integrations such as MCP are outside Stage 1.
+
+* Stage 1 sources
+
+Discovery, enrichment and document acquisition are separate responsibilities, although a provider may serve several roles.
+
+- OpenAlex :: Primary broad keyword search, forward citation search, bibliographic metadata and open-access document locations.
+- arXiv :: Complementary preprint search, abstracts, version information and documents.
+- Semantic Scholar :: Recommendations from relevant seed papers and targeted batch metadata enrichment, rather than primary keyword search.
+- Local library :: Text search, citation traversal and reuse of retained source material.
+- OpenReview :: Accessible decisions, reviews, meta-reviews, discussion, rebuttals and submitted documents for stronger assessment.
+- Crossref :: Optional correction and retraction information for DOI-bearing papers.
+
+Configure recommendations to cover related CS literature across years.
+Only available metadata informs evaluation; its absence is neither a positive nor a negative signal.
+
+Acquire PDFs through arXiv, OpenReview and OpenAlex's open-access locations, preserving document identity and version.
+A separate Unpaywall adapter is unnecessary because it shares OpenAlex's underlying open-access data.
+These sources do not bypass paywalls, and acquisition failures must be disclosed.
+Kagi and dedicated GitHub/Hugging Face integrations are outside Stage 1.
+
+Implement integrations from current official API specifications, not remembered endpoints or limits.
+Share rate limiting across concurrent requests at the documented quota scope, including retries.
+Honour =Retry-After= when provided and use bounded retries with jittered backoff for retryable failures.
+After retries are exhausted, exclude items whose metadata could not be retrieved from the current run and issue an operational warning rather than storing a failed-result record.
+
+* Research loop
+
+Start with a brief defining the question, relevance criteria, constraints and budget.
+
+1. Search OpenAlex, arXiv and the local library, then resolve identities and deduplicate candidates.
+2. Have a cheap flash model screen candidates using basic metadata and abstracts, regardless of their existing enrichment level.
+3. Send every candidate with at least some relevance to both stronger assessment and search expansion.
+4. Have the stronger model assess the paper text and available supplementary evidence, deciding whether to surface it and explaining why.
+5. Expand from every flash-approved candidate using Semantic Scholar recommendations and forward citation search.
+   Find papers citing each seed through OpenAlex and the local citation graph, then deduplicate and return new candidates to screening.
+6. Compare surfaced papers and allocate attention across the shortlist.
+
+Expansion does not wait for stronger assessment, and stronger-model rejection does not prevent expansion.
+The flash relevance gate is the only seed-selection policy required by the MVP.
+Surfacing indicates usefulness to the question, not certification of a paper's claims or conclusions.
+
+Avoid repeated screening and expansion within an unchanged run.
+Use a configurable research time limit of one hour by default, overridable per research question.
+Count elapsed time in the automated research phase, including API waits; the subsequent user-supplied PDF assessment is outside this time limit.
+The time limit, rather than a token or paper-count budget, bounds research.
+Stop scheduling research tasks when the time limit is reached.
+On discovery exhaustion or a graceful stop, end discovery and screening, then complete pending assessments within the remaining time budget before final allocation.
+Discovery is exhausted when no search, seed expansion or screening work remains for the current run.
+A flash batch with no approvals establishes exhaustion only if no other discovery work remains.
+Build the reading list from completed assessments.
+Later executions reuse completed decisions rather than restoring a saved task queue.
+Retain citation edges and minimal records for referenced papers that can become future candidates.
+
+The automated research phase returns ranked results and lists missing documents with paper titles and DOI links, or other source links when no DOI is available.
+In interactive mode, create a temporary PDF intake directory outside the result directory.
+Ask the researcher to add available PDFs and press Enter, warning that the intake directory will be deleted after processing.
+This prompt occurs only at the end of research, outside the research time limit.
+Match supplied PDFs through the existing identity pipeline, using binary flash adjudication for ambiguous matches and reporting unmatched or conflicting files rather than forcing assignments.
+Pressing Enter starts one final extraction and assessment pass without restarting discovery, then recomputes attention and finishes.
+An empty intake directory skips this pass, and papers still lacking usable material remain unevaluated, not rejected.
+Copy surfaced PDFs into managed artifact storage before cleanup.
+Discard other newly supplied originals and remove the temporary intake directory after processing.
+Non-interactive runs report missing documents without blocking.
+
+* Persistent source library
+
+Shared source information includes metadata, extracted text, documents, discussion snapshots, citation edges and provenance.
+Stage 1 also retains research briefs, structured decisions, model/prompt versions, discovery and expansion records, and final allocations for later Stage 2 use.
+These records support per-paper counts of distinct questions at discovery, flash approval, evaluator approval and final reading-list stages.
+Retain checks as well as approvals for progression rates, counting each paper at most once per stage per question.
+Do not retain model conversation transcripts or reasoning traces.
+
+Identify each question by a content hash of its Markdown brief, excluding file paths and CLI or configuration overrides.
+Associate screening and assessment decisions with the question and paper, not an execution ID.
+Only approved full-paper assessments retain short, user-facing surfacing explanations for reading-list output and cached reuse.
+Rerunning a question refreshes discovery to find new papers while reusing decisions for known papers.
+Changing the question or relevance criteria requires fresh screening and assessment, not reacquisition of sources or repetition of question-independent identity checks.
+Changing the reading-list maximum does not change the brief or invalidate those decisions.
+
+Each enrichment level has a predefined source policy; the engine acquires all available inputs specified by that policy before evaluation.
+Agents evaluate the retained inputs and cannot request additional enrichment.
+Retain inputs according to the highest enrichment level reached:
+
+- Discovery :: Basic metadata, identifiers and discovery provenance.
+- Screening-ready :: The metadata and abstract representation required by the flash model.
+- Assessment-ready :: Paper text and supplementary source material required by the stronger model, including accessible OpenReview material.
+- Reading-ready :: All preceding material plus the original PDF for papers surfaced to the researcher.
+
+A completed level means its source policy has been fully executed, so absent metadata means checked and unavailable.
+Interrupted or failed acquisition does not advance the paper's enrichment level.
+Evaluating a paper at a completed level requires no external retrieval.
+Promotion acquires only missing inputs, while rejection never removes acquired material or lowers the level.
+A stronger-model rejection therefore retains assessment-ready text and supplementary material.
+Extract PDF text locally, preserving page boundaries, headings and tables where practical.
+Stage 1 evaluation is text-only, without OCR or image-based figure interpretation.
+
+The library is durable, with no automatic eviction, expiry or freshness-driven refetching.
+Source revisions require an explicit update rather than silent replacement.
+Adding a metadata source includes completing a targeted backfill for papers at or above its enrichment level before normal operation resumes, without reacquiring existing sources or rerunning model assessments.
+Searching for additional papers or citation relationships remains separate from reacquiring assessment inputs.
+
+* Identity and deduplication
+
+Deduplication is owned locally, with a stable internal paper ID linked to external identifiers.
+Use normalised identifier matches and consistent source-reported cross-links first.
+For unresolved records, compare titles, authors, dates and version information to identify plausible duplicates.
+
+Use the flash model to decide whether plausible duplicates are the same work, using retained metadata and abstracts.
+Its decision is binary, with no justification required.
+Merge matching records while preserving their external identifiers, citation relationships and document versions.
+
+Revisions and established preprint/publication counterparts can share a paper identity while retaining separate documents.
+Related follow-ups, corrections and substantial extensions are not automatically duplicates.
+External resolution services are fallbacks, not prerequisites for accepting a paper.
+
+* Model task outputs
+
+Python associates responses with their requests and paper records; models return decisions, not paper IDs or request metadata.
+
+- Duplicate detection :: A binary same-work decision.
+- Flash screening :: A binary pass-to-evaluation decision.
+- Evaluation :: A binary surface decision, with a short explanation only for surfaced papers.
+- Attention allocation :: One non-negative whole-number relative weight per supplied paper, in input order.
+
+* CLI behaviour
+
+Show elapsed and remaining research time, active work, and counts of discovered, screened, assessed and shortlisted papers.
+Keep status updating during pending requests and identify rate-limit waits, retries and backoff rather than appearing stalled.
+Discovery is open-ended, so do not imply a known completion percentage.
+Send progress to stderr and results to stdout, with periodic status lines when no interactive terminal is available.
+Finish with the result directory's location and a summary of completed work, unfinished evaluations and acquisition failures.
+
+Treat the first =Ctrl-C= as a request for graceful completion rather than immediate exit.
+Show an explicit finishing status while pending assessments and final output complete.
+A second =Ctrl-C= aborts remaining work while preserving already committed source data and decisions.
+
+* Output
+
+Return a directory containing =question.md=, =reading-list.md= and ranked PDF symlinks to managed artifacts in =papers/=.
+Keep attention points, explanations and source links in the reading list rather than PDF filenames.
+Passing the directory to the same command reruns its saved brief.
+On rerun, rewrite =reading-list.md= and replace only PDF symlinks pointing into the managed store.
+Leave =question.md=, ordinary files and unrelated symlinks untouched.
+
+Every execution recomputes attention across all evaluator-approved papers for the brief, including papers omitted from earlier reading lists.
+Stored allocations are historical results, not reusable decisions.
+The stronger model assigns relative weights without needing to total 100.
+Python maps the weights to paper records, ranks them and limits the reading list to a configurable maximum of 25 papers by default, overridable per research question.
+This maximum is an output cap, not a target or a limit on screening, assessment or citation expansion.
+Python normalises the retained weights and rounds them to whole points totalling exactly 100, preserving the unrounded ranking.
+Present these points with the evaluation explanations.
+The engine validates the response length and non-negative weights, requiring a positive total for a non-empty allocation.
+An empty shortlist has no allocation and includes an explanation.
+
+Weights express relative attention within this shortlist, not absolute relevance, confidence, quality or exact reading time.
+They belong to the research brief and shortlist version, and may change as papers are added or removed.
+They are not permanent attributes of papers or directly comparable across investigations.
+
+* Implementation stages
+
+** Stage 1: Working discovery tool
+
+Implement the CLI, model-provider abstraction, source integrations, basic loop, local deduplication, citation-based retrieval, durable enrichment and attention-weighted output described above.
+Include time limits and retained decisions sufficient for reuse, but no workflow-snapshot restoration or historical heuristic layer.
+Store the structured records needed by Stage 2 without using them for historical analysis yet.
+The central reuse test is that a new investigation can evaluate existing papers at their retained levels without external source acquisition.
+
+** Stage 2: History and relationship heuristics
+
+Use the structured records retained from Stage 1 and the citation graph to derive progression rates, co-surfacing and shared-reference or shared-citation signals.
+Keep underlying records and meaningful denominators rather than only counters, and preserve the question-specific nature of assessments.
+Do not let historical popularity silently exclude new candidates.
+
+** Stage 3: Personal workflow
+
+Add saving, marking, annotations and organisation after practical use establishes the desired workflow.
+Support BibTeX export for papers associated with a research question or selected from the whole library using Stage 2 heuristics.
+As a stretch goal, support explicit metadata refresh for an individual paper or a set selected by enrichment level or Stage 2 heuristics.
+Provide a way to inspect paper identities and select refresh targets.
+Add an opt-in CLI option when running or rerunning a question to refresh all metadata for its papers and make fresh question-specific decisions instead of reusing cached ones.
+Do not plan these interfaces yet.
+
+* Implementation details
+
+Define remaining model settings, document acquisition details, identity-matching rules and scheduling.
+Provider endpoints and access limits need verification during implementation.
+The internal artifact-store layout remains an implementation choice.
