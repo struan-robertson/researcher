@@ -4,7 +4,9 @@ version = "0.1.0"
 description = "ML literature discovery with a persistent local paper library"
 readme = "README.md"
 requires-python = ">=3.15"
-dependencies = []
+dependencies = [
+    "msgspec>=0.22.0",
+]
 
 [project.scripts]
 researcher = "researcher.cli:main"

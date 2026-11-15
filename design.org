@@ -13,7 +13,8 @@ Relevance is assessed against each investigation's brief, not stored as a univer
 
 Build an independent Python CLI application that calls model APIs directly.
 Expose one command taking a Markdown research brief or an existing result directory, with optional configuration overrides, for example =researcher question.md [options]=.
-CLI arguments override configuration defaults.
+CLI arguments override TOML configuration, which overrides built-in defaults.
+Automatic configuration loading uses =XDG_CONFIG_HOME= only, with no home-directory fallback.
 The command runs research, handles any end-of-run PDF handoff and exits with final results, without requiring separate import or resume commands.
 The Python engine controls the workflow; models perform bounded tasks without searching or requesting enrichment.
 
