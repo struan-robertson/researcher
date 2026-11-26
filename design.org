@@ -28,8 +28,13 @@ Configure a flash role for screening and duplicate detection and an evaluator ro
 The initial evaluator is MiMo 2.6-Pro; provider model identifiers and supported settings belong in configuration rather than prompts.
 
 Use SQLite for paper identities, metadata, citation edges, provenance and operational state.
-Keep PDFs and substantial extracted text in managed artifact storage referenced by the database.
-All model task data, including the research brief and working decisions, comes from database records and referenced artifacts.
+Default the shared database and artefact store to the per-user XDG data directory, independent of the installation and working directories.
+Keep PDFs and substantial extracted text in managed artefact storage referenced by the database.
+Address artefacts by SHA-256 content hashes so identical inputs share a stored file.
+Download artefacts asynchronously through the artefact store using the shared HTTP client, with the store managing temporary files and cleanup.
+Hash completed downloads and publish them by renaming them to their digest paths without copying them.
+Copy local file imports into staging before publishing them under their digest, leaving originals unchanged.
+All model task data, including the research brief and working decisions, comes from database records and referenced artefacts.
 A read-through data layer completes and stores any outstanding acquisition for the requested enrichment level before returning its inputs.
 Python formats the stored data for each task, selecting only the inputs specified for that task's level.
 Continuation reuses stored sources and decisions rather than restoring workflow snapshots.
@@ -62,18 +67,24 @@ After retries are exhausted, exclude items whose metadata could not be retrieved
 * Research loop
 
 Start with a brief defining the question, relevance criteria, constraints and budget.
+The user may explicitly include seed papers in the brief as starting points for discovery.
 
-1. Search OpenAlex, arXiv and the local library, then resolve identities and deduplicate candidates.
+1. Search OpenAlex, arXiv and the local library, then resolve identities and deduplicate both discovered candidates and user-supplied seeds.
 2. Have a cheap flash model screen candidates using basic metadata and abstracts, regardless of their existing enrichment level.
 3. Send every candidate with at least some relevance to both stronger assessment and search expansion.
 4. Have the stronger model assess the paper text and available supplementary evidence, deciding whether to surface it and explaining why.
-5. Expand from every flash-approved candidate using Semantic Scholar recommendations and forward citation search.
+5. Expand from user-supplied seeds without requiring flash approval, and from every flash-approved discovered candidate, using Semantic Scholar recommendations and forward citation search.
    Find papers citing each seed through OpenAlex and the local citation graph, then deduplicate and return new candidates to screening.
 6. Compare surfaced papers and allocate attention across the shortlist.
 
 Expansion does not wait for stronger assessment, and stronger-model rejection does not prevent expansion.
-The flash relevance gate is the only seed-selection policy required by the MVP.
+The flash relevance gate is the only automatic seed-selection policy for discovered candidates.
+User-supplied seeds still require normal screening and assessment before appearing in the reading list.
 Surfacing indicates usefulness to the question, not certification of a paper's claims or conclusions.
+
+Give the stronger evaluator the known publication status, peer-review status and venue, even when the retained PDF is a preprint.
+Treat peer-reviewed publication and venue as qualitative evidence in the surfacing decision, not fixed scores or eligibility gates.
+Do not infer that a paper is unpublished or unreviewed from missing metadata or the choice of PDF.
 
 Avoid repeated screening and expansion within an unchanged run.
 Use a configurable research time limit of one hour by default, overridable per research question.
@@ -94,13 +105,22 @@ This prompt occurs only at the end of research, outside the research time limit.
 Match supplied PDFs through the existing identity pipeline, using binary flash adjudication for ambiguous matches and reporting unmatched or conflicting files rather than forcing assignments.
 Pressing Enter starts one final extraction and assessment pass without restarting discovery, then recomputes attention and finishes.
 An empty intake directory skips this pass, and papers still lacking usable material remain unevaluated, not rejected.
-Copy surfaced PDFs into managed artifact storage before cleanup.
+Copy surfaced PDFs into managed artefact storage before cleanup.
 Discard other newly supplied originals and remove the temporary intake directory after processing.
 Non-interactive runs report missing documents without blocking.
 
 * Persistent source library
 
 Shared source information includes metadata, extracted text, documents, discussion snapshots, citation edges and provenance.
+Store author names as ordered per-paper rows indexed for name-based paper selection, without assigning shared person identities or deduplicating names across papers.
+Store one external source record per paper and provider, containing provider-specific JSON metadata, the source record URL and retrieval time.
+Keep provider-specific metadata as JSON because it is retained source data, not a set of SQL search fields.
+Store candidate PDF locations as ordered child rows of the source record, exposing them as a tuple in source query results.
+Keep submission or revision context in the source metadata and allow metadata-only sources with no PDF location rows.
+Retain candidate PDF locations even when they are not selected for download.
+Keep compact structured metadata in SQLite and substantial source content in managed artefacts.
+Store full OpenReview reviews, rebuttals and discussion snapshots as supplementary JSON or text artefacts, with identifiers, compact decision fields and provenance in metadata.
+Artefact blobs may be shared by content hash, while each paper-artefact association belongs to one paper.
 Stage 1 also retains research briefs, structured decisions, model/prompt versions, discovery and expansion records, and final allocations for later Stage 2 use.
 These records support per-paper counts of distinct questions at discovery, flash approval, evaluator approval and final reading-list stages.
 Retain checks as well as approvals for progression rates, counting each paper at most once per stage per question.
@@ -108,7 +128,7 @@ Do not retain model conversation transcripts or reasoning traces.
 
 Identify each question by a content hash of its Markdown brief, excluding file paths and CLI or configuration overrides.
 Associate screening and assessment decisions with the question and paper, not an execution ID.
-Only approved full-paper assessments retain short, user-facing surfacing explanations for reading-list output and cached reuse.
+Only approved full-paper assessments retain short, user-facing surfacing explanations and suggested PDF filenames for reading-list output and cached reuse.
 Rerunning a question refreshes discovery to find new papers while reusing decisions for known papers.
 Changing the question or relevance criteria requires fresh screening and assessment, not reacquisition of sources or repetition of question-independent identity checks.
 Changing the reading-list maximum does not change the brief or invalidate those decisions.
@@ -127,6 +147,10 @@ Interrupted or failed acquisition does not advance the paper's enrichment level.
 Evaluating a paper at a completed level requires no external retrieval.
 Promotion acquires only missing inputs, while rejection never removes acquired material or lowers the level.
 A stronger-model rejection therefore retains assessment-ready text and supplementary material.
+Use one selected main PDF per paper and reuse its extracted text.
+Try alternative PDF locations only when no usable main document is available.
+Multiple metadata providers do not trigger acquisition of multiple main PDFs.
+Attach the main PDF, extracted text and supplementary artefacts directly to the paper, without a document-version collection.
 Extract PDF text locally, preserving page boundaries, headings and tables where practical.
 Stage 1 evaluation is text-only, without OCR or image-based figure interpretation.
 
@@ -143,9 +167,9 @@ For unresolved records, compare titles, authors, dates and version information t
 
 Use the flash model to decide whether plausible duplicates are the same work, using retained metadata and abstracts.
 Its decision is binary, with no justification required.
-Merge matching records while preserving their external identifiers, citation relationships and document versions.
+Merge matching records while preserving their external identifiers, citation relationships and source provenance.
 
-Revisions and established preprint/publication counterparts can share a paper identity while retaining separate documents.
+Revisions and established preprint/publication counterparts can share a paper identity without acquiring every version.
 Related follow-ups, corrections and substantial extensions are not automatically duplicates.
 External resolution services are fallbacks, not prerequisites for accepting a paper.
 
@@ -155,7 +179,7 @@ Python associates responses with their requests and paper records; models return
 
 - Duplicate detection :: A binary same-work decision.
 - Flash screening :: A binary pass-to-evaluation decision.
-- Evaluation :: A binary surface decision, with a short explanation only for surfaced papers.
+- Evaluation :: A binary =surface= decision, with separate =explanation= and =pdf_filename= fields for surfaced papers only.
 - Attention allocation :: One non-negative whole-number relative weight per supplied paper, in input order.
 
 * CLI behaviour
@@ -172,7 +196,12 @@ A second =Ctrl-C= aborts remaining work while preserving already committed sourc
 
 * Output
 
-Return a directory containing =question.md=, =reading-list.md= and ranked PDF symlinks to managed artifacts in =papers/=.
+Return a directory containing =question.md=, =reading-list.md= and ranked PDF symlinks to managed artefacts in =papers/=.
+Use the evaluator's suggested short, descriptive PDF filename for the user-facing link rather than the downloaded filename.
+Python sanitises the filename, enforces the PDF extension and resolves output-name collisions.
+Fall back to the bibliographic title, or the internal paper ID when no title is available, if the suggestion is missing or unusable.
+Parse the filename from its structured field, not from paragraph breaks in the explanation.
+These names apply only to user-facing links and exports; managed artefact filenames remain content hashes.
 Keep attention points, explanations and source links in the reading list rather than PDF filenames.
 Passing the directory to the same command reruns its saved brief.
 On rerun, rewrite =reading-list.md= and replace only PDF symlinks pointing into the managed store.
@@ -211,6 +240,8 @@ Do not let historical popularity silently exclude new candidates.
 
 Add saving, marking, annotations and organisation after practical use establishes the desired workflow.
 Support BibTeX export for papers associated with a research question or selected from the whole library using Stage 2 heuristics.
+Prefer the citation for an identified peer-reviewed publication of the same work, even if the retained PDF is a preprint.
+Use the best available citation if no peer-reviewed counterpart is verified.
 As a stretch goal, support explicit metadata refresh for an individual paper or a set selected by enrichment level or Stage 2 heuristics.
 Provide a way to inspect paper identities and select refresh targets.
 Add an opt-in CLI option when running or rerunning a question to refresh all metadata for its papers and make fresh question-specific decisions instead of reusing cached ones.
@@ -220,4 +251,3 @@ Do not plan these interfaces yet.
 
 Define remaining model settings, document acquisition details, identity-matching rules and scheduling.
 Provider endpoints and access limits need verification during implementation.
-The internal artifact-store layout remains an implementation choice.

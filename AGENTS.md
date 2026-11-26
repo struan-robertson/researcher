@@ -1,3 +1,8 @@
+# Language
+
+Use UK English spelling in project prose and project-defined identifiers.
+Preserve the documented spelling of external names and APIs.
+
 # Design documentation
 
 `design.org` is the source of truth for the system design.
