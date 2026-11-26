@@ -15,6 +15,7 @@ from typing import Any, Self
 from platformdirs import user_data_path
 
 from researcher.artefacts import ArtefactStore, Blob
+from researcher.question import Question
 
 SCHEMA_VERSION = 1
 DATABASE_FILENAME = "library.sqlite3"
@@ -84,6 +85,40 @@ class Artefact:
     byte_size: int
     media_type: str
     path: Path
+
+
+@dataclass(frozen=True)
+class ScreeningDecision:
+    """The first completed screening result for one question and paper."""
+
+    question_id: str
+    paper_id: str
+    passed: bool
+    model_id: str
+    prompt_version: str
+
+
+@dataclass(frozen=True)
+class AssessmentDecision:
+    """The first completed assessment result for one question and paper."""
+
+    question_id: str
+    paper_id: str
+    surface: bool
+    model_id: str
+    prompt_version: str
+    explanation: str | None
+    pdf_filename: str | None
+
+
+@dataclass(frozen=True)
+class DecisionCounts:
+    """Distinct questions that reached each stage for one paper."""
+
+    screened: int
+    passed_screening: int
+    assessed: int
+    approved_assessment: int
 
 
 @dataclass(frozen=True)
@@ -362,6 +397,156 @@ class Library:
             (paper_id,),
         ).fetchall()
         return tuple(row["cited_paper_id"] for row in rows)
+
+    def record_question(self, question: Question) -> None:
+        """Store a brief's identity and Markdown, keeping the first copy.
+
+        The loader validates and hashes the exact file bytes, so the identity
+        and text are recorded unchanged.
+        """
+        self._connection.execute(
+            "INSERT INTO questions (question_id, text) VALUES (?, ?)"
+            " ON CONFLICT (question_id) DO NOTHING",
+            (question.question_id, question.text),
+        )
+
+    def question_text(self, question_id: str) -> str | None:
+        row = self._connection.execute(
+            "SELECT text FROM questions WHERE question_id = ?", (question_id,)
+        ).fetchone()
+        return None if row is None else row["text"]
+
+    def record_screening(
+        self,
+        question_id: str,
+        paper_id: str,
+        passed: bool,
+        *,
+        model_id: str,
+        prompt_version: str,
+    ) -> None:
+        """Keep the first completed screening result for this question and paper.
+
+        Repeated writes are ignored, and the model and prompt versions record
+        the provenance of the retained result rather than identifying it.
+        """
+        self._connection.execute(
+            """
+            INSERT INTO screening_decisions (
+                question_id, paper_id, passed, model_id, prompt_version
+            )
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT (question_id, paper_id) DO NOTHING
+            """,
+            (question_id, paper_id, passed, model_id, prompt_version),
+        )
+
+    def get_screening(
+        self, question_id: str, paper_id: str
+    ) -> ScreeningDecision | None:
+        row = self._connection.execute(
+            "SELECT passed, model_id, prompt_version FROM screening_decisions"
+            " WHERE question_id = ? AND paper_id = ?",
+            (question_id, paper_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return ScreeningDecision(
+            question_id=question_id,
+            paper_id=paper_id,
+            passed=bool(row["passed"]),
+            model_id=row["model_id"],
+            prompt_version=row["prompt_version"],
+        )
+
+    def record_assessment(
+        self,
+        question_id: str,
+        paper_id: str,
+        surface: bool,
+        *,
+        model_id: str,
+        prompt_version: str,
+        explanation: str | None = None,
+        pdf_filename: str | None = None,
+    ) -> None:
+        """Keep the first completed assessment result for this question and paper.
+
+        A rejection carries no explanation or filename, while an approval
+        requires a nonblank explanation and may suggest a filename. Repeated
+        writes are ignored like screening writes.
+        """
+        self._connection.execute(
+            """
+            INSERT INTO assessment_decisions (
+                question_id, paper_id, surface, model_id, prompt_version,
+                explanation, pdf_filename
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (question_id, paper_id) DO NOTHING
+            """,
+            (
+                question_id,
+                paper_id,
+                surface,
+                model_id,
+                prompt_version,
+                explanation,
+                pdf_filename,
+            ),
+        )
+
+    def get_assessment(
+        self, question_id: str, paper_id: str
+    ) -> AssessmentDecision | None:
+        row = self._connection.execute(
+            "SELECT surface, model_id, prompt_version, explanation, pdf_filename"
+            " FROM assessment_decisions WHERE question_id = ? AND paper_id = ?",
+            (question_id, paper_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return AssessmentDecision(
+            question_id=question_id,
+            paper_id=paper_id,
+            surface=bool(row["surface"]),
+            model_id=row["model_id"],
+            prompt_version=row["prompt_version"],
+            explanation=row["explanation"],
+            pdf_filename=row["pdf_filename"],
+        )
+
+    def decision_counts(self, paper_id: str) -> DecisionCounts:
+        """Count the distinct questions that checked and approved this paper.
+
+        A single statement reads both stages, so the counts describe one
+        snapshot. Papers without any decision count zero at every stage.
+        """
+        row = self._connection.execute(
+            """
+            WITH screening AS (
+                SELECT COUNT(*) AS screened, COALESCE(SUM(passed), 0) AS passed
+                FROM screening_decisions WHERE paper_id = :paper_id
+            ),
+            assessment AS (
+                SELECT COUNT(*) AS assessed, COALESCE(SUM(surface), 0) AS approved
+                FROM assessment_decisions WHERE paper_id = :paper_id
+            )
+            SELECT
+                screening.screened,
+                screening.passed,
+                assessment.assessed,
+                assessment.approved
+            FROM screening, assessment
+            """,
+            {"paper_id": paper_id},
+        ).fetchone()
+        return DecisionCounts(
+            screened=row["screened"],
+            passed_screening=row["passed"],
+            assessed=row["assessed"],
+            approved_assessment=row["approved"],
+        )
 
     def promote(self, paper_id: str, level: EnrichmentLevel) -> EnrichmentLevel:
         """Raise a paper's enrichment level, never lowering it.
@@ -717,6 +902,54 @@ def _schema() -> tuple[str, ...]:
         CREATE UNIQUE INDEX paper_artefacts_single_main_role
             ON paper_artefacts (paper_id, role)
             WHERE role IN ({main_roles})
+        """,
+        """
+        CREATE TABLE questions (
+            question_id TEXT NOT NULL PRIMARY KEY,
+            text TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE screening_decisions (
+            question_id TEXT NOT NULL REFERENCES questions (question_id)
+                ON DELETE CASCADE,
+            paper_id TEXT NOT NULL REFERENCES papers (paper_id)
+                ON DELETE CASCADE,
+            passed INTEGER NOT NULL CHECK (passed IN (0, 1)),
+            model_id TEXT NOT NULL,
+            prompt_version TEXT NOT NULL,
+            PRIMARY KEY (question_id, paper_id)
+        )
+        """,
+        """
+        CREATE INDEX screening_decisions_paper
+            ON screening_decisions (paper_id)
+        """,
+        """
+        CREATE TABLE assessment_decisions (
+            question_id TEXT NOT NULL REFERENCES questions (question_id)
+                ON DELETE CASCADE,
+            paper_id TEXT NOT NULL REFERENCES papers (paper_id)
+                ON DELETE CASCADE,
+            surface INTEGER NOT NULL CHECK (surface IN (0, 1)),
+            model_id TEXT NOT NULL,
+            prompt_version TEXT NOT NULL,
+            explanation TEXT,
+            pdf_filename TEXT,
+            PRIMARY KEY (question_id, paper_id),
+            CHECK (
+                (surface = 0
+                    AND explanation IS NULL
+                    AND pdf_filename IS NULL)
+                OR (surface = 1
+                    AND explanation IS NOT NULL
+                    AND length(trim(explanation, char(32, 9, 10, 13))) > 0)
+            )
+        )
+        """,
+        """
+        CREATE INDEX assessment_decisions_paper
+            ON assessment_decisions (paper_id)
         """,
     )
 

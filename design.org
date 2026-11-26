@@ -126,9 +126,10 @@ These records support per-paper counts of distinct questions at discovery, flash
 Retain checks as well as approvals for progression rates, counting each paper at most once per stage per question.
 Do not retain model conversation transcripts or reasoning traces.
 
-Identify each question by a content hash of its Markdown brief, excluding file paths and CLI or configuration overrides.
-Associate screening and assessment decisions with the question and paper, not an execution ID.
-Only approved full-paper assessments retain short, user-facing surfacing explanations and suggested PDF filenames for reading-list output and cached reuse.
+Store each Markdown brief under its content hash, excluding file paths and CLI or configuration overrides from the identity.
+Keep the first completed screening and assessment decisions for each question and paper, with the model identifier and prompt version used for each.
+Keep rejections scoped to the question and do not record acquisition or evaluation failures as rejections.
+A full-paper approval retains a short surfacing explanation and the suggested PDF filename when available.
 Rerunning a question refreshes discovery to find new papers while reusing decisions for known papers.
 Changing the question or relevance criteria requires fresh screening and assessment, not reacquisition of sources or repetition of question-independent identity checks.
 Changing the reading-list maximum does not change the brief or invalidate those decisions.

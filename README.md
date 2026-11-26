@@ -76,6 +76,14 @@ Use `library.add_artefact_file()` to import a local file without changing the or
 The store manages temporary files internally before publishing artefacts under their content hashes.
 The Python dataclasses are query results, while primary and foreign keys are defined in the SQLite schema.
 
+### Cached decisions
+
+Use `record_question()` to store a loaded brief by its content hash and `question_text()` to retrieve it.
+`record_screening()` and `record_assessment()` retain the first completed result for each brief and paper, including rejections.
+`get_screening()` and `get_assessment()` return `None` when no result is stored.
+Only approved assessments retain an explanation and can include a suggested PDF filename.
+`decision_counts()` reports how many distinct questions checked and approved a paper at each of the two stages.
+
 ## Development
 
 Use system Python 3.15:
