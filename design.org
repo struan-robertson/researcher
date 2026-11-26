@@ -60,8 +60,11 @@ These sources do not bypass paywalls, and acquisition failures must be disclosed
 Kagi and dedicated GitHub/Hugging Face integrations are outside Stage 1.
 
 Implement integrations from current official API specifications, not remembered endpoints or limits.
-Share rate limiting across concurrent requests at the documented quota scope, including retries.
-Honour =Retry-After= when provided and use bounded retries with jittered backoff for retryable failures.
+Use HTTPX for asynchronous requests and bound each request across quota waits, attempts and backoff.
+Route every attempt through the limiter shared by requests in its documented quota scope.
+Honour valid =Retry-After= hints on rate-limit and service-unavailable responses, and do not retry sooner to fit the deadline.
+Retry eligible failures once by default with capped, jittered backoff.
+Replay only GET and HEAD by default, allowing other methods only when an integration establishes that replay is safe.
 After retries are exhausted, exclude items whose metadata could not be retrieved from the current run and issue an operational warning rather than storing a failed-result record.
 
 * Research loop
