@@ -18,14 +18,26 @@ Automatic configuration loading uses =XDG_CONFIG_HOME= only, with no home-direct
 The command runs research, handles any end-of-run PDF handoff and exits with final results, without requiring separate import or resume commands.
 The Python engine controls the workflow; models perform bounded tasks without searching or requesting enrichment.
 
-Access models through a provider abstraction that owns API communication, authentication and provider-specific request headers.
-The initial integration uses OpenCode with an application-specific =User-Agent= and a stable =x-opencode-session= ID per model conversation.
-Preserve the session ID across retries, using distinct IDs for independent conversations.
+Access models through a provider abstraction with text-only, non-streaming adapters for OpenAI Chat Completions, Anthropic Messages and Gemini generateContent.
+Configure each endpoint's API format, URL, credential source and custom request headers independently of the research engine.
+Allow plain HTTP for local model servers and report unusable endpoints when making a request.
+Read named API keys from a separate =credentials.toml= beside the selected configuration file or at its default XDG location.
+Accept only regular credentials files.
+On POSIX, also require current-user ownership with no group or other permissions.
+A configured environment variable overrides the named key when set.
 Keep authentication extensible so OAuth can be added later without changing the research engine.
+Send an application-specific =User-Agent= and allow custom headers to include the generated conversation ID.
+Reject custom headers that override client-managed headers or repeat a name, and defer wire-format checks to the HTTP stack.
+The default endpoint is OpenCode Go, with the conversation ID sent in =x-opencode-session=.
+Send the required context in each model request body and generate a new conversation ID for every completion, even within the same research run.
+Do not replay inference POSTs automatically unless the endpoint establishes that replay is safe.
 Pi and pi-subagents are not runtime dependencies.
 
 Configure a flash role for screening and duplicate detection and an evaluator role for paper assessment and attention allocation.
-The initial evaluator is MiMo 2.6-Pro; provider model identifiers and supported settings belong in configuration rather than prompts.
+The initial flash model is DeepSeek V4.1 Flash and the initial evaluator is MiMo 2.6-Pro.
+Use Chat Completions for both defaults and share their OpenCode Go quota.
+Using DeepSeek V4.1 Flash through OpenCode Go requires the workspace's Global region setting.
+Keep model identifiers and settings in configuration rather than prompts, and validate task outputs locally.
 
 Use SQLite for paper identities, metadata, citation edges, provenance and operational state.
 Default the shared database and artefact store to the per-user XDG data directory, independent of the installation and working directories.

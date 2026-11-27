@@ -30,6 +30,70 @@ TOML is loaded into a typed `msgspec` schema, which rejects unknown settings and
 `max_papers` must be a positive integer.
 `time_limit` accepts a positive number followed by `s`, `m` or `h`, such as `45m` or `0.5h`.
 
+## Model endpoints
+
+The model client supports text-only, non-streaming OpenAI Chat Completions, Anthropic Messages and Gemini `generateContent`.
+The CLI does not call it yet.
+The default configuration is equivalent to:
+
+```toml
+[flash_model]
+endpoint = "opencode"
+model_id = "deepseek-v4.1-flash"
+
+[evaluator_model]
+endpoint = "opencode"
+model_id = "mimo-v2.6-pro"
+
+[endpoints.opencode]
+api = "openai"
+base_url = "https://opencode.ai/inference/go/openai/v1"
+credential = "opencode"
+api_key_env = "OPENCODE_API_KEY"
+quota_scope = "opencode-go"
+
+[endpoints.opencode.headers]
+x-opencode-session = "ses_{conversation_id}"
+```
+
+The OpenCode defaults require a [Go subscription and a key with model request access](https://opencode.ai/docs/console/go/).
+DeepSeek V4.1 Flash also requires **Global** under **Settings → Privacy → Regions** in the OpenCode workspace.
+Researcher does not change that setting.
+
+Put API keys in a separate `credentials.toml` next to the selected `config.toml`.
+Without `--config`, the default location is `$XDG_CONFIG_HOME/researcher/credentials.toml`, even if `config.toml` does not exist.
+For the OpenCode defaults, add this entry to `credentials.toml`:
+
+```toml
+opencode = "your-api-key"
+```
+
+On POSIX, create the file with owner-only permissions, such as `0600`, before adding the key.
+The file contains plaintext keys; keep it out of version control.
+Several endpoint profiles can refer to the same named credential.
+If the optional `api_key_env` variable is set, it overrides the file key.
+For automation, a profile can specify `api_key_env` without a named credential.
+
+To use a different service, configure an endpoint and point one or both model roles at it.
+Specifying `endpoints` replaces the default endpoint map, so include every endpoint that either role references.
+The API format determines the path appended to `base_url` and the default authentication header:
+
+| `api` | Native `base_url` | Appended path | Default `auth` |
+| --- | --- | --- | --- |
+| `openai` | `https://api.openai.com/v1` | `/chat/completions` | `bearer` |
+| `anthropic` | `https://api.anthropic.com/v1` | `/messages` | `x-api-key` |
+| `gemini` | `https://generativelanguage.googleapis.com/v1beta` | `/models/<model_id>:generateContent` | `x-goog-api-key` |
+
+Local OpenAI-compatible servers such as llama.cpp can use `base_url = "http://127.0.0.1:8080/v1"`.
+Use HTTPS for remote services so credentials and prompts are encrypted in transit.
+Use `auth = "bearer"` where a gateway requires bearer authentication with a different API format.
+Set `max_output_tokens` in a model role when a cap is needed; Anthropic Messages requires it.
+Chat Completions sends an explicit cap as `max_completion_tokens`; check that your endpoint supports that field before setting it.
+Anthropic Messages defaults to `anthropic-version: 2026-10-21`, which an endpoint can override in its headers.
+Custom headers support `{conversation_id}`, which the client generates afresh for each model call.
+Use the same `quota_scope` value on endpoint profiles that share a documented quota.
+Automatic retries do not replay inference requests.
+
 ## Library API
 
 `Library()` uses `platformdirs` to select the per-user data directory containing `library.sqlite3` and `artefacts/<sha256>`.
